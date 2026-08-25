@@ -213,26 +213,41 @@ clean tree (`.build` removed first) with Swift 6.0.3 on Linux:
 
 ```
 Build complete!                       0 warnings
-Executed 98 tests, with 0 failures
+Executed 101 tests, with 0 failures
 ```
 
 | Suite | Tests | What it holds down |
 |---|---:|---|
 | `SaturatingTests` | 14 | Every input that makes the built-in operator trap |
-| `ViewportTests` | 10 | NaN / negative / absurd dimensions, classification boundaries and override |
+| `ViewportTests` | 11 | NaN / negative / absurd dimensions, classification boundaries and override |
 | `BudgetPolicyTests` | 7 | Exact hand-computed budgets, hard ceilings, degenerate policy inputs |
 | `PlanReconcilerTests` | 17 | Admission order, dedupe, budget edges, plus a 400-case property test |
 | `TransitionDebouncerTests` | 14 | Storms, deadline non-extension, clock-ceiling saturation |
-| `CapacityPlannerTests` | 17 | Generation fencing, salvage, abandonment, bounded ring, 120 concurrent writers |
+| `CapacityPlannerTests` | 19 | Generation fencing, salvage, abandonment, event contents, 120 concurrent writers |
 | `InvariantCheckerTests` | 19 | **Deliberately broken transitions, asserting the checker fails** |
 
-**These 98 tests cover `DisplayClassPlanner`, the core module — all of the planning logic.** They do
-**not** cover `DisplayClassPlannerUI`, which is demo scaffolding: it is compile-checked by the iOS CI
-job and exercised by hand, but has no unit tests. That gap is real and it has already cost something
-— an independent review found a genuine bug in the view model (a held contraction was being planned
-against the pre-contraction viewport) that a unit test would have caught immediately. The fix added
-`PlannerSnapshot.pendingViewport`, because the underlying cause was that the *library* gave callers
-no way to see which viewport a pending tick was for.
+**These 101 tests cover `DisplayClassPlanner`, the core module — all of the planning logic.** They do
+**not** cover `DisplayClassPlannerUI`, which is demo scaffolding: it is **compile-checked only**, by
+the iOS CI job. No unit tests, and — see below — it has never been run.
+
+That gap is real and it has already cost something. An independent review found a genuine bug in the
+view model: a held contraction was being planned against the *pre-contraction* viewport, so the
+transition it produced had the wrong priorities. A unit test would have caught it immediately. The
+fix added `PlannerSnapshot.pendingViewport`, because the underlying cause was that the *library* gave
+callers no way to see which viewport a pending tick was for — a missing affordance, not just a typo
+in the demo.
+
+### What was not verified
+
+**The demo app has never been launched on a Simulator, and no screenshots exist.** Screen-control
+access was available, but the machine had an unrelated project open in Xcode, so the run was
+abandoned rather than clicking through someone else's work.
+
+"It compiles for an iOS Simulator" and "it ran on a Simulator" are different claims, and only the
+first is made anywhere in this repo. The companion demo repo says the same thing in the same words.
+
+No performance number is claimed anywhere either; the budget arithmetic in this README is
+hand-computed and pinned by tests, not measured.
 
 Three things in there are worth naming, because they are the tests that would otherwise have been
 comfortable and useless:
@@ -250,14 +265,15 @@ comfortable and useless:
   pre-state; a gap means a generation was burned without producing a transition. A subset-or-count
   check would have caught neither.
 
-CI runs the same two commands on every push. See the repo's **Actions** tab for live status.
+CI runs the same two commands on every push to `main` and on every pull request targeting it. See
+the repo's **Actions** tab for live status.
 
 ---
 
 ## Using it
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/display-class-planner-kit.git", from: "2.0.0")
+.package(url: "https://github.com/rajatslakhina/display-class-planner-kit.git", from: "2.0.1")
 ```
 
 ```swift
@@ -313,7 +329,7 @@ The whole module is behind `#if canImport(SwiftUI)`, so the package still builds
 
 **Demo app:** **[display-class-planner-kit-demo-app](https://github.com/rajatslakhina/display-class-planner-kit-demo-app)**
 — a separate repo with a real `Demo.xcodeproj` that consumes this package as a *remote* dependency
-pinned to `exactVersion 2.0.0`, so its CI proves this library is genuinely consumable from GitHub
+pinned to `exactVersion 2.0.1`, so its CI proves this library is genuinely consumable from GitHub
 rather than only from a checkout next door.
 
 ---

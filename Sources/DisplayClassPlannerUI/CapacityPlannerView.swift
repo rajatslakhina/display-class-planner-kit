@@ -94,6 +94,10 @@ public struct CapacityPlannerView: View {
             HStack(spacing: 10) {
                 metric("storms absorbed", "\(snapshot.withdrawnStorms)")
                 metric("salvaged", "\(snapshot.salvagedResponses)")
+                // Admitted and cancelled are shown together on purpose: the
+                // ratio between them is the whole argument. A planner that
+                // cancels nearly as much as it admits is thrashing.
+                metric("admitted", "\(snapshot.admittedTotal)")
                 metric("cancelled", "\(snapshot.cancelledTotal)")
             }
         }

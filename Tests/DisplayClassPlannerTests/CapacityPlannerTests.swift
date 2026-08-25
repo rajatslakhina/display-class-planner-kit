@@ -341,6 +341,94 @@ final class CapacityPlannerTests: XCTestCase {
         XCTAssertEqual(snapshot.inFlight.count, 3)
     }
 
+    // MARK: - The event log actually says something
+
+    func testEventsCarryTheirKindGenerationAndDetail() async {
+        // The ring's *size* was tested; its *contents* were not. Every entry
+        // could have been stamped `generation: 0, kind: .discarded, detail: ""`
+        // and the suite would have stayed green — while the demo renders these
+        // strings verbatim.
+        let planner = makePlanner(at: compact)
+        _ = await planner.apply(viewport: compact, desired: catalog, at: 0)
+        _ = await planner.apply(viewport: regular, desired: catalog, at: 1_000)
+        _ = await planner.complete(WorkID("never-admitted"), generation: 1)
+
+        let events = await planner.snapshot().events
+        XCTAssertEqual(events.count, 3)
+
+        XCTAssertEqual(events.map(\.kind), [.replanned, .replanned, .discarded])
+        // Generations are stamped at the moment the event is recorded, so the
+        // two commits read 1 and 2 and the completion reads the current one.
+        XCTAssertEqual(events.map(\.generation), [1, 2, 2])
+        XCTAssertTrue(
+            events[0].detail.contains("admit:2"),
+            "seed detail should name what it admitted, got: \(events[0].detail)"
+        )
+        XCTAssertTrue(
+            events[1].detail.contains("keep:2") && events[1].detail.contains("admit:3"),
+            "expansion detail should name retained and admitted, got: \(events[1].detail)"
+        )
+        XCTAssertTrue(
+            events[2].detail.contains("never-admitted"),
+            "a discard must name the id, got: \(events[2].detail)"
+        )
+    }
+
+    // MARK: - The non-nil arm of `.withdrawn`
+
+    func testAStormThatRevertsToDifferentDimensionsStillReplans() async {
+        // `.withdrawn(replan:)` carries a transition when the surface comes
+        // back at the same display class but a *different size*, so the budget
+        // genuinely moved. Nothing exercised that arm: `apply` could have
+        // returned `.withdrawn(replan: nil)` unconditionally and passed.
+        let planner = makePlanner(at: regular)
+        _ = await planner.apply(viewport: regular, desired: catalog, at: 0)
+
+        // Contract — held, nothing cancelled yet.
+        _ = await planner.apply(viewport: compact, desired: catalog, at: 1_000)
+
+        // Revert, but to a *wider* regular surface. Same class, so the pending
+        // contraction is withdrawn; different budget tier under `expansive`?
+        // No — still `.regular`, but this planner's FixedBudgetPolicy gives
+        // every regular surface the same budget, so the replan must be nil.
+        let sameBudget = await planner.apply(
+            viewport: Viewport(width: 800, height: 820, columnCount: 2, scale: 3),
+            desired: catalog,
+            at: 100_000_000
+        )
+        guard case .withdrawn(let replanA) = sameBudget else {
+            return XCTFail("expected withdrawn, got \(sameBudget)")
+        }
+        XCTAssertNil(replanA, "budget did not move, so there is nothing to re-plan")
+
+        // Now the same shape of storm against a policy whose budget *does*
+        // depend on the measurements, so the withdrawal must carry a replan.
+        let areaSensitive = AreaProportionalBudgetPolicy()
+        let planner2 = CapacityPlanner(viewport: regular, budgetPolicy: areaSensitive)
+        _ = await planner2.apply(viewport: regular, desired: catalog, at: 0)
+        _ = await planner2.apply(viewport: compact, desired: catalog, at: 1_000)
+        let moved = await planner2.apply(
+            viewport: Viewport(width: 1_000, height: 820, columnCount: 2, scale: 3),
+            desired: catalog,
+            at: 100_000_000
+        )
+        guard case .withdrawn(let replanB) = moved else {
+            return XCTFail("expected withdrawn, got \(moved)")
+        }
+        XCTAssertNotNil(
+            replanB,
+            "the surface came back bigger — the budget moved and a replan is owed"
+        )
+        // And it is a real transition, not an empty one.
+        XCTAssertEqual(replanB?.generation, 2)
+        XCTAssertTrue(replanB?.validate().isEmpty ?? false)
+
+        // Either way the storm cancelled nothing.
+        let snapshot = await planner2.snapshot()
+        XCTAssertEqual(snapshot.cancelledTotal, 0)
+        XCTAssertEqual(snapshot.withdrawnStorms, 1)
+    }
+
     // MARK: - Concurrency
 
     func testConcurrentCommitsGetUniqueContiguousGenerations() async {

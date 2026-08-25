@@ -82,6 +82,35 @@ final class ViewportTests: XCTestCase {
         XCTAssertEqual(derived, tiny)
     }
 
+    func testEqualityComparesTheSurfaceNotHowItsClassWasDecided() {
+        // Synthesized `==` would compare the private `explicitDisplayClass`,
+        // so a viewport that *derived* `.compact` would not equal one that was
+        // *told* `.compact` — despite every public property, `displayClass`
+        // included, being identical. `Viewport` is embedded in three Hashable
+        // types, so that distinction would leak into Sets and dictionary keys.
+        let derived = Viewport(width: 100, height: 100, columnCount: 1, scale: 1)
+        let told = Viewport(
+            width: 100, height: 100, columnCount: 1, scale: 1, displayClass: .compact
+        )
+        XCTAssertEqual(derived.displayClass, told.displayClass)
+        XCTAssertEqual(derived, told)
+        XCTAssertEqual(derived.hashValue, told.hashValue)
+        XCTAssertEqual(Set([derived, told]).count, 1)
+
+        // A genuinely different classification is still a different viewport.
+        let overridden = Viewport(
+            width: 100, height: 100, columnCount: 1, scale: 1, displayClass: .expansive
+        )
+        XCTAssertNotEqual(derived, overridden)
+        XCTAssertEqual(Set([derived, told, overridden]).count, 2)
+
+        // And the measurements still matter.
+        XCTAssertNotEqual(
+            derived,
+            Viewport(width: 101, height: 100, columnCount: 1, scale: 1)
+        )
+    }
+
     func testDescriptionRendersWithoutTrappingOnHostileDimensions() {
         // `description` formats the dimensions as Ints. `Int(Double)` traps on
         // NaN and on out-of-range values, and this is the one place in the

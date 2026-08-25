@@ -154,6 +154,34 @@ public struct Viewport: Sendable, Hashable, CustomStringConvertible {
     /// has been measured, and what a NaN-bearing `CGSize` normalises to.
     public static let zero = Viewport(width: 0, height: 0, columnCount: 1, scale: 1)
 
+    // MARK: - Equality
+
+    // Written by hand rather than synthesized. The synthesized version would
+    // compare `explicitDisplayClass`, which is an *implementation detail of how
+    // the class was arrived at* — so a viewport that derived `.compact` would
+    // not equal an otherwise identical one that was told `.compact`, even
+    // though every public property of the two, `displayClass` included, is the
+    // same. `Viewport` is embedded in `PlanTransition`, `PlannerSnapshot` and
+    // `TransitionDebouncer`, all `Hashable`, so that distinction would leak
+    // into any `Set` or dictionary keyed on them. Two viewports are equal when
+    // they describe the same surface.
+
+    public static func == (lhs: Viewport, rhs: Viewport) -> Bool {
+        lhs.width == rhs.width
+            && lhs.height == rhs.height
+            && lhs.columnCount == rhs.columnCount
+            && lhs.scale == rhs.scale
+            && lhs.displayClass == rhs.displayClass
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(width)
+        hasher.combine(height)
+        hasher.combine(columnCount)
+        hasher.combine(scale)
+        hasher.combine(displayClass)
+    }
+
     public var description: String {
         // `Int(_: Double)` even here: the dimensions are provably finite and
         // in range by the time they are stored, but "every conversion in this

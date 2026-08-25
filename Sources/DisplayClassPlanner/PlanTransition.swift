@@ -67,8 +67,17 @@ public struct PlanTransition: Sendable, Hashable {
     }
 
     /// Number of items that will be in flight once the caller has applied this.
+    ///
+    /// Saturating, like every other runtime-value sum in the package. These
+    /// three counts are bounded by `CapacityBudget.maxPrefetchDepth` when the
+    /// transition comes from `PlanReconciler`, but `PlanTransition` is a public
+    /// value type anyone can construct — including a test feeding it garbage —
+    /// and "it can't overflow if you built it correctly" is not a bound.
     public var resultingInFlightCount: Int {
-        retained.count + reprioritized.count + admitted.count
+        Saturating.adding(
+            Saturating.adding(retained.count, reprioritized.count),
+            admitted.count
+        )
     }
 
     /// True when nothing needs to happen. Callers can short-circuit on this
