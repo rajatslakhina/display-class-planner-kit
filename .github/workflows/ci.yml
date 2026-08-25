@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux · build + test (warnings as errors)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+
+      # `-warnings-as-errors` is here rather than asserted in the README, so
+      # "zero warnings" is machine-enforced on every push.
+      - name: Build
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test -Xswiftc -warnings-as-errors
+
+  ios:
+    name: iOS Simulator · build (SwiftUI module)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Linux job compiles DisplayClassPlannerUI to an empty module,
+      # because SwiftUI is unavailable there. This job is the only place the
+      # SwiftUI source is actually type-checked.
+      #
+      # `generic/platform=iOS Simulator` deliberately, never a named device:
+      # pinning to `name=iPhone 16,OS=latest` ties the job to whichever
+      # simulator *runtimes* happen to be installed on that day's runner image,
+      # and they are not guaranteed. A compile-only check needs no device.
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme DisplayClassPlannerUI \
+            -destination 'generic/platform=iOS Simulator' \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
