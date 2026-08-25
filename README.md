@@ -89,9 +89,17 @@ Five pieces, each independently testable, each replaceable:
 every caller the same bug to write. The reconciliation is the value; exporting it as homework defeats
 the point.
 
-The invariant this buys is checkable, and it is exposed as `PlanTransition.validate()`:
+The invariant this buys is checkable, and it is exposed as `PlanTransition.validate(inFlight:)`:
 
-> No identity appears in `cancelled` and in any of `retained` / `reprioritized` / `admitted`.
+> **Consistency** — no identity appears in `cancelled` and in any of `retained` / `reprioritized` /
+> `admitted`, and none appears in two of them.
+>
+> **Completeness** — every identity that *was* in flight appears in exactly one bucket.
+
+The second half is the one that matters more and is the easier one to forget. Contradiction-checking
+alone cannot see an id that the transition simply fails to mention: that request is never cancelled
+and never kept, so it runs forever and its slot is never reclaimed. `validate()` with no argument can
+only check consistency; `validate(inFlight:)` checks both. Pass the set when you have it.
 
 ### Design decision 2 — hysteresis is asymmetric
 
@@ -124,12 +132,19 @@ planner returns one of four verdicts:
 |---|---|
 | `.accepted` | Current generation. Ordinary. |
 | `.acceptedStale` | Older generation, but still wanted. Keep it. |
-| `.salvaged(originalGeneration:currentAdmission:)` | **Issued, cancelled, re-admitted, and only now arriving.** Keep the payload; do not issue the duplicate request. |
+| `.salvaged(originalGeneration:currentAdmission:)` | **Issued, cancelled, re-admitted, and only now arriving.** The payload satisfies the new admission. |
 | `.discarded` | Cancelled and never re-admitted. Drop it. |
 
 `.salvaged` is the case a hand-rolled implementation almost always gets wrong, because the obvious
 guard is `if response.generation != currentGeneration { return }` — which throws away bytes you already
 paid for, for an item you currently want.
+
+**What the caller has to do to actually save the fetch.** Cancellation on iOS is cooperative:
+`URLSessionTask.cancel()` is a request, and bytes already on the wire still arrive. So a caller that
+treats `admitted` as "open a connection right now, unconditionally" has already spent those bytes by
+the time this verdict can be returned, and `.salvaged` degrades into a diagnostic. To benefit, keep
+your outstanding-response table keyed by `WorkID` and, when an id is admitted, check it before
+issuing. The planner reports the situation; it cannot un-send a request you chose to send.
 
 ### Design decision 4 — the actor never suspends
 
@@ -164,19 +179,25 @@ those are exactly the values that come through as `0`, as `.nan`, or as somethin
 rotation or a fold. "It can't be NaN in practice" is not a safety argument; it is a prediction about a
 value you do not own.
 
-So every operation that can trap goes through `Saturating`:
+So every conversion and every arithmetic operation in this package that *could* trap goes through
+`Saturating` — including the ones that are provably safe at their call site, because a rule with
+remembered exceptions is not a rule:
 
 - `Int(someDouble)` traps on NaN, on ±infinity, and out of range → `Saturating.int(clamping:)`, whose
-  bounds are derived from `Int.max` / `Int.min` rather than 64-bit literals (`Int` is 32-bit on watchOS).
+  bounds are derived from `Int.max` / `Int.min` rather than 64-bit literals, so they stay correct
+  wherever `Int` is not 64 bits wide.
 - `+` and `*` overflow → `Saturating.adding` / `Saturating.multiplying`, clamping to the correct end.
-- `/` and `%` by zero, and `Int.min / -1` → `Saturating.dividing` / `Saturating.remainder`.
+- `/` by zero, and `Int.min / -1` → `Saturating.dividing`.
 - Deadlines are `now + hold` on a `UInt64` clock → saturating, so a clock near its ceiling delays a
   commit instead of wrapping into the past.
 
+`Saturating` deliberately has **no `%`**. This package never takes a remainder, and a saturating `%`
+sitting there unused would be dead code in the one file whose whole job is to be trustworthy.
+
 There are **no force-unwraps and no unchecked subscripts anywhere in the package.** Growth is bounded
 structurally: the in-flight table only grows through admission, admission is capped by
-`CapacityBudget.maxPrefetchDepth`, and the diagnostic event log is a ring of
-`CapacityPlanner.maxEventLogSize`.
+`CapacityBudget.maxPrefetchDepth` (512), and the diagnostic event log is a ring of
+`CapacityPlanner.maxEventLogSize` (64).
 
 ---
 
@@ -187,26 +208,34 @@ clean tree (`.build` removed first) with Swift 6.0.3 on Linux:
 
 ```
 Build complete!                       0 warnings
-Executed 85 tests, with 0 failures
+Executed 90 tests, with 0 failures
 ```
 
 | Suite | Tests | What it holds down |
 |---|---:|---|
-| `SaturatingTests` | 14 | Every input that makes the built-in operator trap |
+| `SaturatingTests` | 13 | Every input that makes the built-in operator trap |
 | `ViewportTests` | 8 | NaN / negative / absurd dimensions, classification boundaries |
 | `BudgetPolicyTests` | 7 | Exact hand-computed budgets, hard ceilings, degenerate policy inputs |
 | `PlanReconcilerTests` | 16 | Admission order, dedupe, budget edges, plus a 400-case property test |
 | `TransitionDebouncerTests` | 13 | Storms, deadline non-extension, clock-ceiling saturation |
 | `CapacityPlannerTests` | 14 | Generation fencing, salvage, bounded ring, 120 concurrent writers |
-| `InvariantCheckerTests` | 13 | **Deliberately broken transitions, asserting the checker fails** |
+| `InvariantCheckerTests` | 19 | **Deliberately broken transitions, asserting the checker fails** |
 
-`InvariantCheckerTests` exists because a checker that returns `[]` for everything would make every other
-test in this suite pass while catching nothing. Each test there hands `validate()` a transition that is
-wrong in one specific way and asserts the matching violation is reported — with a positive control at
-the top, so a checker that reported violations unconditionally would also fail.
+Three things in there are worth naming, because they are the tests that would otherwise have been
+comfortable and useless:
 
-The concurrency test uses 120 real concurrent tasks writing to the same actor, not a single-threaded
-loop wearing an `async` keyword.
+- **`InvariantCheckerTests` feeds `validate()` broken input on purpose.** A checker that returns `[]`
+  for everything would make every other test in the suite pass while catching nothing. Each test hands
+  it a transition that is wrong in one specific way and asserts the matching violation — with two
+  positive controls, so a checker that reported violations *unconditionally* would fail too.
+- **The 400-case property test passes the in-flight set.** Without it, `validate` can only find
+  contradictions, and the property test would pass against a `reconcile` that returned an empty
+  transition for every input. With it, that implementation fails on the first iteration.
+- **The concurrency test asserts something the code does not satisfy by construction.** 120 real
+  concurrent tasks write to the same actor, and the assertion is that the generations handed out are
+  exactly `1...n` — no duplicates, no gaps. A duplicate means two commits diffed against the same
+  pre-state; a gap means a generation was burned without producing a transition. A subset-or-count
+  check would have caught neither.
 
 CI runs the same two commands on every push. See the repo's **Actions** tab for live status.
 
@@ -235,7 +264,7 @@ case .held(let deadline):
     scheduleTick(at: deadline)                  // contraction is waiting out its hold
 case .withdrawn(let replan):
     // The storm reverted. Nothing was cancelled.
-    replan.map(apply)
+    if let replan { apply(replan) }
 case .replanned(let transition):
     apply(transition)
 }
@@ -244,7 +273,11 @@ func apply(_ t: PlanTransition) {
     // `t.retained` is deliberately absent from this function.
     t.cancelled.forEach(cancel)
     t.reprioritized.forEach { requeue($0.id, at: $0.to) }
-    t.admitted.forEach { start($0, generation: t.generation) }
+    for item in t.admitted where !hasOutstandingResponse(item.id) {
+        // The guard is what makes `.salvaged` worth something: a response for
+        // this id may still be on the wire from before it was cancelled.
+        start(item, generation: t.generation)
+    }
 }
 
 // When a response lands:

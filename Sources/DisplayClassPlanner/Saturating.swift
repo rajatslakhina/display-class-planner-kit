@@ -3,9 +3,13 @@
 //  DisplayClassPlanner
 //
 //  Every arithmetic operation in this package that *could* trap goes through
-//  here. Swift's default integer arithmetic traps on overflow, `/` and `%` trap
-//  on a zero divisor, `Int.min / -1` traps, and `Int(someDouble)` traps on NaN,
-//  on ±infinity, and on any value outside `Int`'s representable range.
+//  here. Swift's default integer arithmetic traps on overflow, `/` traps on a
+//  zero divisor, `Int.min / -1` traps, and `Int(someDouble)` traps on NaN, on
+//  ±infinity, and on any value outside `Int`'s representable range.
+//
+//  Only the operations this package actually performs live here. A saturating
+//  `%` would round the set out nicely and would also be dead code, which is
+//  worse than a gap: an unused helper in a file about safety reads as coverage.
 //
 //  A capacity planner derives its numbers from `CGSize` values that arrive from
 //  UIKit/SwiftUI mid-transition, and those are exactly the values that come
@@ -55,17 +59,6 @@ public enum Saturating {
         return a / b
     }
 
-    /// `a % b`, defined for every input.
-    ///
-    /// - Returns: `0` when `b == 0`, and `0` for `Int.min % -1` (mathematically
-    ///   `0`, but the hardware instruction traps alongside the division).
-    @inlinable
-    public static func remainder(_ a: Int, dividingBy b: Int) -> Int {
-        guard b != 0 else { return 0 }
-        guard !(a == Int.min && b == -1) else { return 0 }
-        return a % b
-    }
-
     // MARK: - UInt64 (monotonic timestamps)
 
     /// `a + b`, clamped to `UInt64.max`.
@@ -91,8 +84,9 @@ public enum Saturating {
     /// - Out-of-range finite values clamp to the nearest bound.
     ///
     /// The bounds are derived from `Int.max` / `Int.min` rather than written as
-    /// 64-bit literals, because `Int` is 32-bit on watchOS and a hardcoded
-    /// `9223372036854775807` would silently stop being a bound there.
+    /// 64-bit literals, so they stay correct on any platform where `Int` is not
+    /// 64 bits wide — a hardcoded `9223372036854775807` would silently stop
+    /// being a bound there.
     ///
     /// `Double(Int.max)` rounds *up* to `2^63` on a 64-bit platform (`Int.max`
     /// itself is not representable as a `Double`), so the upper comparison is

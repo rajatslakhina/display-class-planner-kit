@@ -43,8 +43,18 @@ public enum CompletionVerdict: Sendable, Hashable {
 
     /// **The storm payoff.** This request was issued, cancelled by a re-plan,
     /// and the same id was admitted again before the original response landed.
-    /// The payload satisfies the new admission: keep it, and do not issue the
-    /// duplicate request the naive implementation would.
+    /// The payload satisfies the new admission.
+    ///
+    /// **What the caller must do to benefit.** Cancellation on iOS is
+    /// cooperative: `URLSessionTask.cancel()` is a request, and bytes already
+    /// in flight still arrive. To turn that into a saved fetch, a caller must
+    /// not treat "admitted" as "start immediately and unconditionally" — it
+    /// should check whether a response for that id is still outstanding and, if
+    /// so, wait for it rather than opening a second connection. A caller that
+    /// fires a fresh request the instant an id is admitted has already spent
+    /// the bytes by the time this verdict can be returned, and `.salvaged`
+    /// degrades to a diagnostic. The planner reports the situation; it cannot
+    /// un-send a request the caller chose to send.
     case salvaged(originalGeneration: UInt64, currentAdmission: UInt64)
 
     /// Cancelled and never re-admitted. Drop the payload.
@@ -232,7 +242,10 @@ public actor CapacityPlanner {
     ///   `PlanTransition.generation` from the transition that admitted it.
     public func complete(_ id: WorkID, generation completionGeneration: UInt64) -> CompletionVerdict {
         guard let entry = inFlight[id] else {
-            record(.discarded, detail: "\(id) completed after cancellation")
+            // Not in flight. Either it was cancelled and never re-admitted, or
+            // this is a second delivery for an id already completed. The
+            // planner cannot distinguish the two and does not pretend to.
+            record(.discarded, detail: "\(id) is not in flight — cancelled, or already delivered")
             return .discarded
         }
         inFlight.removeValue(forKey: id)

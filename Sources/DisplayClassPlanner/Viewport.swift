@@ -121,7 +121,12 @@ public struct Viewport: Sendable, Hashable, CustomStringConvertible {
     public static let zero = Viewport(width: 0, height: 0, columnCount: 1, scale: 1)
 
     public var description: String {
-        "Viewport(\(Int(width.rounded()))x\(Int(height.rounded())) "
-            + "cols:\(columnCount) @\(scale)x -> .\(displayClass))"
+        // `Int(_: Double)` even here: the dimensions are provably finite and
+        // in range by the time they are stored, but "every conversion in this
+        // package goes through Saturating" is only a useful rule if it has no
+        // exceptions a reader has to remember.
+        let w = Saturating.int(clamping: width.rounded())
+        let h = Saturating.int(clamping: height.rounded())
+        return "Viewport(\(w)x\(h) cols:\(columnCount) @\(scale)x -> .\(displayClass))"
     }
 }

@@ -192,7 +192,7 @@ public struct CapacityPlannerView: View {
     private func color(for row: CapacityPlannerViewModel.CatalogRow) -> Color {
         guard let priority = row.inFlightPriority else { return Color(white: 0.9) }
         switch priority {
-        case .visible: return .accentColor
+        case .visible: return .blue
         case .adjacent: return .teal
         case .speculative: return .gray
         }
@@ -200,7 +200,7 @@ public struct CapacityPlannerView: View {
 
     private var legend: some View {
         HStack(spacing: 12) {
-            legendChip(.accentColor, "visible")
+            legendChip(.blue, "visible")
             legendChip(.teal, "adjacent")
             legendChip(.gray, "speculative")
             legendChip(Color(white: 0.9), "not admitted")

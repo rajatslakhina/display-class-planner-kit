@@ -114,6 +114,23 @@ extension PlanTransition {
         /// numbers so a failure message is actionable.
         case overDecodeBudget(bytes: Int, limit: Int)
 
+        /// An id that was in flight before this transition appears in *none* of
+        /// the four buckets. The caller is never told to cancel it and never
+        /// told to keep it, so the request runs forever and its slot is never
+        /// reclaimed. Checking only for contradictions misses this entirely,
+        /// which is why the in-flight set is worth passing in.
+        case leaked(WorkID)
+
+        /// `cancelled` names an id that was not running. Tearing down a request
+        /// that does not exist is either a double-cancel or a bookkeeping
+        /// error; both are bugs.
+        case phantomCancellation(WorkID)
+
+        /// `retained` or `reprioritized` names an id that was not running, so
+        /// the caller is told to keep alive something it never started — and
+        /// the item is silently never fetched.
+        case keptButNotRunning(WorkID)
+
         public var description: String {
             switch self {
             case .cancelledAndKept(let id):
@@ -126,6 +143,12 @@ extension PlanTransition {
                 return "transition leaves \(count) in flight, budget allows \(limit)"
             case .overDecodeBudget(let bytes, let limit):
                 return "admitted \(bytes) decode bytes, budget allows \(limit)"
+            case .leaked(let id):
+                return "\(id) was in flight and this transition says nothing about it — it leaks"
+            case .phantomCancellation(let id):
+                return "\(id) is cancelled but was not in flight"
+            case .keptButNotRunning(let id):
+                return "\(id) is retained or reprioritized but was not in flight"
             }
         }
     }
@@ -137,13 +160,28 @@ extension PlanTransition {
     /// suite, and `DisplayClassPlannerTests` uses it against *deliberately
     /// broken* transitions to prove the checker is not vacuous.
     ///
-    /// - Parameter allowOversizedHeadItem: mirrors
-    ///   ``PlanReconciler/Policy/admitsOversizedHeadItem``. When `true`, a
-    ///   single admitted item is permitted to exceed the whole decode budget,
-    ///   because starving the one visible cell is worse than overshooting.
+    /// - Parameters:
+    ///   - inFlight: what was running *before* this transition. Optional,
+    ///     because a caller holding only the transition can still check it for
+    ///     self-contradiction — but **pass it when you have it.** Without it,
+    ///     `validate` can only catch contradictions (an id both cancelled and
+    ///     kept); with it, it also catches *omissions* (an id that was running
+    ///     and is now mentioned nowhere), which is the leak this package exists
+    ///     to prevent and which no amount of internal-consistency checking can
+    ///     see.
+    ///   - allowOversizedHeadItem: mirrors
+    ///     ``PlanReconciler/Policy/admitsOversizedHeadItem``. When `true`, a
+    ///     lone admitted item is permitted to exceed the whole decode budget,
+    ///     because starving the one visible cell is worse than overshooting.
+    ///     The exemption additionally requires `retained` and `reprioritized`
+    ///     to be empty: the reconciler only exempts the item at the *head* of
+    ///     admission order, and anything already retained sits ahead of it.
     /// - Returns: every violation found, in a deterministic order. Empty means
-    ///   the transition is internally consistent.
-    public func validate(allowOversizedHeadItem: Bool = true) -> [InvariantViolation] {
+    ///   the transition is consistent.
+    public func validate(
+        inFlight: Set<WorkID>? = nil,
+        allowOversizedHeadItem: Bool = true
+    ) -> [InvariantViolation] {
         var violations: [InvariantViolation] = []
 
         let cancelledSet = Set(cancelled)
@@ -188,11 +226,32 @@ extension PlanTransition {
             admittedBytes = Saturating.adding(admittedBytes, item.estimatedDecodeBytes)
         }
         let overshoots = admittedBytes > budget.decodeByteBudget
-        let excusedAsHeadItem = allowOversizedHeadItem && admitted.count <= 1
+        // The reconciler's exemption is for the item at the *head* of admission
+        // order. Anything retained or reprioritized was admitted ahead of this
+        // item and has already spent budget, so a lone oversized item behind it
+        // is not a head item and is not excused.
+        let excusedAsHeadItem = allowOversizedHeadItem
+            && admitted.count <= 1
+            && retained.isEmpty
+            && reprioritized.isEmpty
         if overshoots && !excusedAsHeadItem {
             violations.append(
                 .overDecodeBudget(bytes: admittedBytes, limit: budget.decodeByteBudget)
             )
+        }
+
+        // Completeness. Only checkable against the pre-transition in-flight set.
+        if let inFlight {
+            let keptSet = Set(retained).union(reprioritized.map(\.id))
+            for id in inFlight.subtracting(keptSet).subtracting(cancelledSet).sorted() {
+                violations.append(.leaked(id))
+            }
+            for id in cancelledSet.subtracting(inFlight).sorted() {
+                violations.append(.phantomCancellation(id))
+            }
+            for id in keptSet.subtracting(inFlight).sorted() {
+                violations.append(.keptButNotRunning(id))
+            }
         }
 
         return violations

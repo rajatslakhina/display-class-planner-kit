@@ -284,44 +284,77 @@ final class CapacityPlannerTests: XCTestCase {
 
     // MARK: - Concurrency
 
-    func testConcurrentDriversLeaveTheActorSelfConsistent() async {
-        // A concurrency test with real concurrent writers: 120 tasks all
-        // mutating the same actor, interleaved arbitrarily by the runtime.
+    func testConcurrentCommitsGetUniqueContiguousGenerations() async {
+        // 120 real concurrent writers against one actor.
+        //
+        // The assertion is deliberately NOT a bound the implementation
+        // satisfies by construction. Every commit — from `apply` or from
+        // `tick`, on any task — must receive its own generation, and the set of
+        // generations handed out must be exactly `1...n` with no gaps and no
+        // duplicates. A duplicate means two commits observed the same
+        // pre-state and one of them diffed against a plan that no longer
+        // existed; a gap means a generation was burned without producing a
+        // transition. Both are the reentrancy bug this actor's
+        // no-suspension-point design exists to rule out, and neither is
+        // detectable from a subset/count check.
         let planner = makePlanner(at: compact)
         let items = catalog
         let compactViewport = compact
         let regularViewport = regular
 
-        await withTaskGroup(of: Void.self) { group in
+        let observed = await withTaskGroup(of: [UInt64].self) { group -> [UInt64] in
             for iteration in 0..<120 {
                 group.addTask {
+                    var generations: [UInt64] = []
                     let clock = UInt64(iteration) * 10_000_000
                     if iteration.isMultiple(of: 3) {
-                        _ = await planner.apply(
+                        let outcome = await planner.apply(
                             viewport: regularViewport, desired: items, at: clock
                         )
+                        if let t = outcome.transition { generations.append(t.generation) }
                     } else if iteration.isMultiple(of: 2) {
-                        _ = await planner.apply(
+                        let outcome = await planner.apply(
                             viewport: compactViewport, desired: items, at: clock
                         )
+                        if let t = outcome.transition { generations.append(t.generation) }
                     } else {
                         _ = await planner.complete(
                             WorkID("asset-\(iteration % 6)"), generation: UInt64(iteration % 4)
                         )
                     }
-                    _ = await planner.tick(desired: items, at: clock)
+                    if let t = await planner.tick(desired: items, at: clock) {
+                        generations.append(t.generation)
+                    }
+                    return generations
                 }
             }
+            var all: [UInt64] = []
+            for await chunk in group { all.append(contentsOf: chunk) }
+            return all
         }
 
         let snapshot = await planner.snapshot()
-        // Whatever interleaving happened, the invariants hold: nothing outside
-        // the catalogue is in flight, the table respects the largest budget in
-        // play, and the log is still bounded.
+
+        // `guard` rather than `XCTAssertFalse`: an empty result would make the
+        // range below invalid, and a test that traps is not a failing test.
+        guard !observed.isEmpty else {
+            return XCTFail("no commit happened at all — the test proved nothing")
+        }
+        XCTAssertEqual(
+            Set(observed).count, observed.count,
+            "two commits shared a generation: \(observed.sorted())"
+        )
+        XCTAssertEqual(
+            observed.sorted(), Array(1...UInt64(observed.count)),
+            "generations were not contiguous from 1: \(observed.sorted())"
+        )
+        // The actor's own counter must agree with what the callers were told.
+        XCTAssertEqual(snapshot.generation, UInt64(observed.count))
+
+        // And the structural bounds still hold.
         let catalogIDs = Set(items.map(\.id))
         XCTAssertTrue(Set(snapshot.inFlight.keys).isSubset(of: catalogIDs))
         XCTAssertLessThanOrEqual(snapshot.inFlight.count, 5)
         XCTAssertLessThanOrEqual(snapshot.events.count, CapacityPlanner.maxEventLogSize)
-        XCTAssertGreaterThanOrEqual(snapshot.generation, 1)
     }
 }

@@ -85,12 +85,6 @@ final class SaturatingTests: XCTestCase {
         XCTAssertEqual(Saturating.dividing(-7, by: 2), -3)
     }
 
-    func testRemainderIsDefinedForEveryInput() {
-        XCTAssertEqual(Saturating.remainder(10, dividingBy: 0), 0)
-        XCTAssertEqual(Saturating.remainder(Int.min, dividingBy: -1), 0)
-        XCTAssertEqual(Saturating.remainder(7, dividingBy: 3), 1)
-    }
-
     // MARK: - Clamping
 
     func testClampInt() {

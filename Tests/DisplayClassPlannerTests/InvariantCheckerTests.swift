@@ -154,6 +154,80 @@ final class InvariantCheckerTests: XCTestCase {
         )
     }
 
+    // MARK: - Completeness (only checkable against the in-flight set)
+
+    func testAnInFlightIdMentionedNowhereIsReportedAsLeaked() {
+        // The bug contradiction-checking cannot see: the request is never
+        // cancelled and never kept, so it runs forever and its slot is gone.
+        let leaky = transition(retained: ["a"], cancelled: ["b"])
+        let inFlight: Set<WorkID> = [WorkID("a"), WorkID("b"), WorkID("ghost")]
+        XCTAssertEqual(leaky.validate(inFlight: inFlight), [.leaked(WorkID("ghost"))])
+        // And without the in-flight set the same transition looks perfect —
+        // which is exactly why the parameter exists.
+        XCTAssertEqual(leaky.validate(), [])
+    }
+
+    func testCancellingSomethingThatWasNotRunningIsCaught() {
+        let phantom = transition(cancelled: ["not-running"])
+        XCTAssertEqual(
+            phantom.validate(inFlight: []),
+            [.phantomCancellation(WorkID("not-running"))]
+        )
+    }
+
+    func testRetainingSomethingThatWasNotRunningIsCaught() {
+        // "Keep doing what you're doing" for a request that was never started
+        // means the item is silently never fetched.
+        let bogus = transition(
+            retained: ["never-started"],
+            reprioritized: [.init(id: WorkID("also-never"), from: .visible, to: .adjacent)]
+        )
+        XCTAssertEqual(
+            bogus.validate(inFlight: []),
+            [.keptButNotRunning(WorkID("also-never")), .keptButNotRunning(WorkID("never-started"))]
+        )
+    }
+
+    func testACompleteTransitionPassesTheCompletenessCheck() {
+        // Positive control for the completeness half.
+        let complete = transition(
+            retained: ["a"],
+            reprioritized: [.init(id: WorkID("b"), from: .speculative, to: .visible)],
+            cancelled: ["c"],
+            admitted: [item("d")]
+        )
+        let inFlight: Set<WorkID> = [WorkID("a"), WorkID("b"), WorkID("c")]
+        XCTAssertEqual(complete.validate(inFlight: inFlight), [])
+    }
+
+    func testAnEmptyTransitionAgainstANonEmptyInFlightSetLeaksEverything() {
+        // The specific failure the 400-case property test would otherwise miss:
+        // a reconciler that returns nothing for every input.
+        let doNothing = transition()
+        let inFlight: Set<WorkID> = [WorkID("x"), WorkID("y")]
+        XCTAssertEqual(
+            doNothing.validate(inFlight: inFlight),
+            [.leaked(WorkID("x")), .leaked(WorkID("y"))]
+        )
+    }
+
+    // MARK: - Head-item exemption boundary
+
+    func testAnOversizedItemBehindRetainedWorkIsNotAHeadItem() {
+        // The reconciler only exempts the item at the head of admission order.
+        // Anything retained sits ahead of it and has already spent budget, so
+        // this must NOT be excused — otherwise the checker is looser than the
+        // code it is supposed to police.
+        let behindRetained = transition(
+            retained: ["already-running"],
+            admitted: [item("huge", bytes: 9_999)]
+        )
+        XCTAssertEqual(
+            behindRetained.validate(),
+            [.overDecodeBudget(bytes: 9_999, limit: 1_000)]
+        )
+    }
+
     // MARK: - Descriptions
 
     func testViolationDescriptionsNameTheOffendingId() {

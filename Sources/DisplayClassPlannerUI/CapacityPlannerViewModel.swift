@@ -85,6 +85,11 @@ public final class CapacityPlannerViewModel {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 50_000_000)
             if Task.isCancelled { return }
+            // A scripted scenario drives the clock and the tick itself. If this
+            // loop were allowed to run concurrently it could consume the
+            // scenario's pending contraction first, leaving the scenario to
+            // observe `nil` and report — falsely — that nothing was cancelled.
+            guard !isRunningScenario else { continue }
             await serviceDeadline()
         }
     }

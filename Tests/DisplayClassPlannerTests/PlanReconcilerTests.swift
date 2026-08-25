@@ -132,10 +132,24 @@ final class PlanReconcilerTests: XCTestCase {
         XCTAssertEqual(admitted.map(\.id.rawValue), ["p"])
     }
 
-    func testNegativeByteEstimatesCannotRefundBudget() {
-        // Clamped in WorkItem.init: a negative estimate would let an item give
-        // budget back to the admission loop and admit unbounded work.
-        XCTAssertEqual(item("n", .visible, index: 0, bytes: -1_000).estimatedDecodeBytes, 0)
+    func testNegativeByteEstimatesCannotRefundBudgetDuringAdmission() {
+        // A negative estimate would let an item hand budget *back* to the
+        // admission loop, letting everything behind it in. The clamp lives in
+        // WorkItem.init, but the behaviour that matters is in the loop, so this
+        // asserts through `admissibleSet` rather than through the initialiser.
+        let items = [
+            item("a", .visible, index: 0, bytes: 200),
+            item("refund", .visible, index: 1, bytes: -10_000), // clamps to 0
+            item("b", .visible, index: 2, bytes: 200),
+            item("c", .visible, index: 3, bytes: 200),
+        ]
+        // Budget of 400 fits "a" (200) + "refund" (0) + "b" (400). "c" would
+        // reach 600 and is refused. If the -10 000 were honoured, the running
+        // total after "refund" would be -9 800 and every item would fit.
+        let admitted = reconciler.admissibleSet(
+            from: items, budget: budget(depth: 10, bytes: 400)
+        )
+        XCTAssertEqual(admitted.map(\.id.rawValue), ["a", "refund", "b"])
     }
 
     // MARK: - Reconciliation
@@ -284,7 +298,12 @@ final class PlanReconcilerTests: XCTestCase {
                 budget: budget,
                 generation: UInt64(iteration)
             )
+            // The in-flight set is passed deliberately. Without it `validate`
+            // can only detect contradictions, and this whole property test
+            // would pass against a `reconcile` that returned an empty
+            // transition for every input.
             let violations = transition.validate(
+                inFlight: Set(inFlight.keys),
                 allowOversizedHeadItem: subject.policy.admitsOversizedHeadItem
             )
             XCTAssertTrue(
