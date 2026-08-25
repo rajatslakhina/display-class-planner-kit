@@ -243,6 +243,36 @@ final class PlanReconcilerTests: XCTestCase {
         XCTAssertEqual(transition.retained.map(\.rawValue), ["d"])
     }
 
+    func testATransitionThatActuallyChangesSomethingIsNotANoop() {
+        // Without this, `isNoop { true }` passes the whole suite.
+        let admitting = reconciler.reconcile(
+            inFlight: [:],
+            desired: [item("d", .visible, index: 1)],
+            viewport: .zero,
+            budget: budget(depth: 5, bytes: 10_000),
+            generation: 4
+        )
+        XCTAssertFalse(admitting.isNoop, "admitting work is not a no-op")
+
+        let cancelling = reconciler.reconcile(
+            inFlight: [WorkID("gone"): .visible],
+            desired: [],
+            viewport: .zero,
+            budget: budget(depth: 5, bytes: 10_000),
+            generation: 5
+        )
+        XCTAssertFalse(cancelling.isNoop, "cancelling work is not a no-op")
+
+        let repriotizing = reconciler.reconcile(
+            inFlight: [WorkID("d"): .speculative],
+            desired: [item("d", .visible, index: 1)],
+            viewport: .zero,
+            budget: budget(depth: 5, bytes: 10_000),
+            generation: 6
+        )
+        XCTAssertFalse(repriotizing.isNoop, "a priority change is not a no-op")
+    }
+
     // MARK: - Property test over pseudo-random scenarios
 
     func testReconcilerNeverProducesAnInvalidTransition() {

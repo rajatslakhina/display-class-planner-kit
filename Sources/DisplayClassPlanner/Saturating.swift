@@ -73,6 +73,17 @@ public enum Saturating {
         return overflowed ? UInt64.max : result
     }
 
+    /// `a - b`, clamped to `0`.
+    ///
+    /// Unsigned subtraction traps on underflow, and the natural expression
+    /// `now - lastSample` underflows the instant a clock is not perfectly
+    /// monotonic. Clamping turns "time went backwards" into "no time passed",
+    /// which is a glitch; trapping turns it into a crash.
+    @inlinable
+    public static func subtracting(_ a: UInt64, _ b: UInt64) -> UInt64 {
+        a > b ? a - b : 0
+    }
+
     // MARK: - Double to Int
 
     /// `Int(value)` for every `Double`, including the four inputs that trap.

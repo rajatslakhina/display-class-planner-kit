@@ -179,20 +179,25 @@ those are exactly the values that come through as `0`, as `.nan`, or as somethin
 rotation or a fold. "It can't be NaN in practice" is not a safety argument; it is a prediction about a
 value you do not own.
 
-So every conversion and every arithmetic operation in this package that *could* trap goes through
-`Saturating` — including the ones that are provably safe at their call site, because a rule with
-remembered exceptions is not a rule:
+So **every operation on a runtime value that could trap goes through `Saturating`** — including ones
+that are provably safe at their call site, because a rule with remembered exceptions is not a rule.
+(Division by a *literal* non-zero constant — `bytes / 1024` in a `description` — is not routed
+through it: the divisor is visible to the compiler, so there is nothing to guard and a wrapper would
+only obscure it. That is the whole exception, and it is stated rather than left to be discovered.)
 
 - `Int(someDouble)` traps on NaN, on ±infinity, and out of range → `Saturating.int(clamping:)`, whose
   bounds are derived from `Int.max` / `Int.min` rather than 64-bit literals, so they stay correct
   wherever `Int` is not 64 bits wide.
 - `+` and `*` overflow → `Saturating.adding` / `Saturating.multiplying`, clamping to the correct end.
-- `/` by zero, and `Int.min / -1` → `Saturating.dividing`.
-- Deadlines are `now + hold` on a `UInt64` clock → saturating, so a clock near its ceiling delays a
-  commit instead of wrapping into the past.
+- `/` by a runtime value, and `Int.min / -1` → `Saturating.dividing`.
+- Deadlines are `now + hold` on a `UInt64` clock → `Saturating.adding`, so a clock near its ceiling
+  delays a commit instead of wrapping into the past. Elapsed time is `now - last` → unsigned
+  subtraction traps on underflow, so `Saturating.subtracting` clamps at zero: a clock that goes
+  backwards becomes a glitch rather than a crash.
 
-`Saturating` deliberately has **no `%`**. This package never takes a remainder, and a saturating `%`
-sitting there unused would be dead code in the one file whose whole job is to be trustworthy.
+`Saturating` deliberately has **no `%`**. Nothing in `Sources/` takes a remainder, and a saturating
+`%` sitting there unused would be dead code in the one file whose whole job is to be trustworthy.
+The same standard removed `PlanTransition.touchedIDs`, which was a public convenience nothing called.
 
 There are **no force-unwraps and no unchecked subscripts anywhere in the package.** Growth is bounded
 structurally: the in-flight table only grows through admission, admission is capped by
@@ -208,18 +213,26 @@ clean tree (`.build` removed first) with Swift 6.0.3 on Linux:
 
 ```
 Build complete!                       0 warnings
-Executed 90 tests, with 0 failures
+Executed 98 tests, with 0 failures
 ```
 
 | Suite | Tests | What it holds down |
 |---|---:|---|
-| `SaturatingTests` | 13 | Every input that makes the built-in operator trap |
-| `ViewportTests` | 8 | NaN / negative / absurd dimensions, classification boundaries |
+| `SaturatingTests` | 14 | Every input that makes the built-in operator trap |
+| `ViewportTests` | 10 | NaN / negative / absurd dimensions, classification boundaries and override |
 | `BudgetPolicyTests` | 7 | Exact hand-computed budgets, hard ceilings, degenerate policy inputs |
-| `PlanReconcilerTests` | 16 | Admission order, dedupe, budget edges, plus a 400-case property test |
-| `TransitionDebouncerTests` | 13 | Storms, deadline non-extension, clock-ceiling saturation |
-| `CapacityPlannerTests` | 14 | Generation fencing, salvage, bounded ring, 120 concurrent writers |
+| `PlanReconcilerTests` | 17 | Admission order, dedupe, budget edges, plus a 400-case property test |
+| `TransitionDebouncerTests` | 14 | Storms, deadline non-extension, clock-ceiling saturation |
+| `CapacityPlannerTests` | 17 | Generation fencing, salvage, abandonment, bounded ring, 120 concurrent writers |
 | `InvariantCheckerTests` | 19 | **Deliberately broken transitions, asserting the checker fails** |
+
+**These 98 tests cover `DisplayClassPlanner`, the core module — all of the planning logic.** They do
+**not** cover `DisplayClassPlannerUI`, which is demo scaffolding: it is compile-checked by the iOS CI
+job and exercised by hand, but has no unit tests. That gap is real and it has already cost something
+— an independent review found a genuine bug in the view model (a held contraction was being planned
+against the pre-contraction viewport) that a unit test would have caught immediately. The fix added
+`PlannerSnapshot.pendingViewport`, because the underlying cause was that the *library* gave callers
+no way to see which viewport a pending tick was for.
 
 Three things in there are worth naming, because they are the tests that would otherwise have been
 comfortable and useless:
@@ -244,7 +257,7 @@ CI runs the same two commands on every push. See the repo's **Actions** tab for 
 ## Using it
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/display-class-planner-kit.git", from: "1.0.0")
+.package(url: "https://github.com/rajatslakhina/display-class-planner-kit.git", from: "2.0.0")
 ```
 
 ```swift
@@ -287,12 +300,21 @@ case .accepted, .acceptedStale, .salvaged:
 case .discarded:
     break
 }
+
+// And when one never will — a transport error, a killed task, a decode that threw.
+// Without this the id stays in the in-flight table forever: every later re-plan
+// finds it "running" and retains it, so it is never cancelled and never re-issued.
+// A planner with only a success path leaks.
+await planner.abandon(id)
 ```
 
 `DisplayClassPlannerUI` ships a SwiftUI surface (`CapacityPlannerView`) that drives all of this live.
 The whole module is behind `#if canImport(SwiftUI)`, so the package still builds and tests on Linux.
 
-**Demo app:** *(added after the companion repo is pushed — see below)*
+**Demo app:** **[display-class-planner-kit-demo-app](https://github.com/rajatslakhina/display-class-planner-kit-demo-app)**
+— a separate repo with a real `Demo.xcodeproj` that consumes this package as a *remote* dependency
+pinned to `exactVersion 2.0.0`, so its CI proves this library is genuinely consumable from GitHub
+rather than only from a checkout next door.
 
 ---
 
@@ -305,12 +327,15 @@ because those choices are where a real app's constraints live.
 
 The display-class thresholds in `Viewport` are **this package's defaults, chosen so a single-column
 phone-sized surface lands in `.compact` and a two-pane surface lands in `.regular`. They are not Apple
-hardware specifications and are not claimed to be.** Supply your own classification to match your device
-matrix.
+hardware specifications and are not claimed to be.** To use your own device matrix, classify however
+you like and pass the answer to `Viewport(width:height:columnCount:scale:displayClass:)` — an explicit
+class wins over the thresholds entirely, and every downstream decision follows it.
 
 ## Requirements
 
-Swift 6.0+ · iOS 17+ (the core module is platform-agnostic and is built and tested on Linux in CI)
+**Swift 6.0+ toolchain — Xcode 16 or newer.** (Xcode 15 ships Swift 5.9/5.10 and cannot parse a
+`swift-tools-version: 6.0` manifest.) iOS 17+. The core module is platform-agnostic and is built and
+tested on Linux in CI.
 
 ## Licence
 

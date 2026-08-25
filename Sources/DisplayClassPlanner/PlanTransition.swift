@@ -66,11 +66,6 @@ public struct PlanTransition: Sendable, Hashable {
         }
     }
 
-    /// Every id this transition says something about.
-    public var touchedIDs: [WorkID] {
-        retained + reprioritized.map(\.id) + cancelled + admitted.map(\.id)
-    }
-
     /// Number of items that will be in flight once the caller has applied this.
     public var resultingInFlightCount: Int {
         retained.count + reprioritized.count + admitted.count

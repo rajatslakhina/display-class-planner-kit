@@ -59,9 +59,12 @@ public struct Viewport: Sendable, Hashable, CustomStringConvertible {
     ///
     /// These are **this package's defaults, not Apple hardware specifications.**
     /// They are chosen so a single-column phone-sized surface lands in
-    /// `.compact` and a near-square two-pane surface lands in `.regular`. Supply
-    /// your own values through `Viewport.classify(area:columnCount:)`'s callers
-    /// — or reclassify entirely — to match your real device matrix.
+    /// `.compact` and a near-square two-pane surface lands in `.regular`.
+    ///
+    /// To use your own device matrix, classify however you like and pass the
+    /// answer to ``init(width:height:columnCount:scale:displayClass:)`` — the
+    /// explicit class wins over these thresholds entirely. That initialiser is
+    /// the seam; these constants are only the default behind it.
     public static let regularAreaThreshold: Double = 380_000
     public static let expansiveAreaThreshold: Double = 900_000
 
@@ -75,12 +78,40 @@ public struct Viewport: Sendable, Hashable, CustomStringConvertible {
     /// - `scale` is clamped to `(0, maxScale]`, falling back to `1` for
     ///   non-finite or non-positive input.
     public init(width: Double, height: Double, columnCount: Int, scale: Double = 2) {
+        self.init(
+            width: width, height: height, columnCount: columnCount,
+            scale: scale, displayClass: nil
+        )
+    }
+
+    /// Creates a viewport whose display class you decide.
+    ///
+    /// The area thresholds this package ships are defaults, not hardware
+    /// facts. When your device matrix disagrees with them — a tall narrow
+    /// surface you consider `.regular`, a large one you deliberately treat as
+    /// `.compact` under memory pressure — classify it yourself and pass the
+    /// answer here. Every downstream decision (hysteresis direction, budget
+    /// tier) follows the value you supply.
+    ///
+    /// - Parameter displayClass: the class to use, or `nil` to derive it from
+    ///   area and column count as usual.
+    public init(
+        width: Double,
+        height: Double,
+        columnCount: Int,
+        scale: Double = 2,
+        displayClass: DisplayClass?
+    ) {
         self.width = Viewport.sanitizeDimension(width)
         self.height = Viewport.sanitizeDimension(height)
         self.columnCount = Saturating.clamp(columnCount, to: 1...Viewport.maxColumnCount)
         let sanitizedScale = Saturating.clamp(scale, to: 0...Viewport.maxScale)
         self.scale = sanitizedScale > 0 ? sanitizedScale : 1
+        self.explicitDisplayClass = displayClass
     }
+
+    /// Set when the caller classified this surface themselves.
+    private let explicitDisplayClass: DisplayClass?
 
     private static func sanitizeDimension(_ value: Double) -> Double {
         guard value.isFinite, value > 0 else { return 0 }
@@ -94,8 +125,11 @@ public struct Viewport: Sendable, Hashable, CustomStringConvertible {
     public var backingPixelArea: Double { area * scale * scale }
 
     /// The capacity tier this viewport falls into.
+    ///
+    /// An explicitly supplied class always wins; otherwise it is derived from
+    /// area and column count.
     public var displayClass: DisplayClass {
-        Viewport.classify(area: area, columnCount: columnCount)
+        explicitDisplayClass ?? Viewport.classify(area: area, columnCount: columnCount)
     }
 
     /// Pure classification, exposed so tests and custom policies can reuse it.

@@ -69,6 +69,7 @@ public struct PlannerEvent: Sendable, Hashable {
         case withdrawn
         case salvaged
         case discarded
+        case abandoned
     }
 
     public let generation: UInt64
@@ -94,6 +95,16 @@ public struct PlannerSnapshot: Sendable, Hashable {
     public let committed: Viewport
     public let budget: CapacityBudget
     public let pendingDeadline: UInt64?
+
+    /// The viewport a held contraction is waiting to commit, if any.
+    ///
+    /// Exposed because ``CapacityPlanner/tick(desired:at:)`` asks the caller
+    /// for the work it wants — and during a hold the answer is "the work the
+    /// *pending* surface wants", not the committed one. Without this, a caller
+    /// has no way to compute the right `desired` set and will silently plan the
+    /// contraction against the pre-contraction viewport. Prefer
+    /// `pendingViewport ?? committed`.
+    public let pendingViewport: Viewport?
     public let inFlight: [WorkID: WorkPriority]
     public let withdrawnStorms: Int
     public let salvagedResponses: Int
@@ -106,6 +117,7 @@ public struct PlannerSnapshot: Sendable, Hashable {
         committed: Viewport,
         budget: CapacityBudget,
         pendingDeadline: UInt64?,
+        pendingViewport: Viewport? = nil,
         inFlight: [WorkID: WorkPriority],
         withdrawnStorms: Int,
         salvagedResponses: Int,
@@ -117,6 +129,7 @@ public struct PlannerSnapshot: Sendable, Hashable {
         self.committed = committed
         self.budget = budget
         self.pendingDeadline = pendingDeadline
+        self.pendingViewport = pendingViewport
         self.inFlight = inFlight
         self.withdrawnStorms = withdrawnStorms
         self.salvagedResponses = salvagedResponses
@@ -265,6 +278,31 @@ public actor CapacityPlanner {
         return completionGeneration == generation ? .accepted : .acceptedStale
     }
 
+    /// Reports that a request will never deliver — a transport error, a task
+    /// that was genuinely killed, a decode that threw.
+    ///
+    /// **Why this exists.** `complete` is the success path, and a planner with
+    /// only a success path leaks. The recommended wiring asks callers not to
+    /// re-issue an id while a response for it is still outstanding, precisely
+    /// so `.salvaged` can save the bytes — but if that response never arrives
+    /// and nothing says so, the id stays in the in-flight table forever. Every
+    /// later reconcile then finds it running and buckets it as `retained`, so
+    /// it is never cancelled *and* never re-issued: a permanently blank cell
+    /// holding a slot. That is exactly ``PlanTransition/InvariantViolation/leaked(_:)``,
+    /// arrived at by following the happy path.
+    ///
+    /// Calling this frees the slot and makes the id eligible for admission
+    /// again on the next re-plan.
+    ///
+    /// - Returns: `true` if the id was in flight, `false` if it was already
+    ///   cancelled or delivered (in which case there was nothing to free).
+    @discardableResult
+    public func abandon(_ id: WorkID) -> Bool {
+        guard inFlight.removeValue(forKey: id) != nil else { return false }
+        record(.abandoned, detail: "\(id) will not deliver — slot released")
+        return true
+    }
+
     // MARK: - Reading state
 
     public func snapshot() -> PlannerSnapshot {
@@ -273,6 +311,7 @@ public actor CapacityPlanner {
             committed: debouncer.committed,
             budget: committedBudget,
             pendingDeadline: debouncer.nextDeadline,
+            pendingViewport: debouncer.pending?.viewport,
             inFlight: inFlight.mapValues(\.priority),
             withdrawnStorms: debouncer.withdrawnCount,
             salvagedResponses: salvagedResponses,

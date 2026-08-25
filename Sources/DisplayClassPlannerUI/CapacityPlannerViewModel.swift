@@ -108,7 +108,12 @@ public final class CapacityPlannerViewModel {
 
     private func serviceDeadline() async {
         advanceClockToRealTime()
-        let desired = configuration.catalog(snapshot.committed)
+        // `pendingViewport`, not `committed`. During a hold the committed
+        // viewport is still the PRE-contraction one, so planning the
+        // contraction against it asks for the work the old surface wanted and
+        // produces a transition with the wrong priorities.
+        let planningFor = snapshot.pendingViewport ?? snapshot.committed
+        let desired = configuration.catalog(planningFor)
         guard let transition = await planner.tick(desired: desired, at: clock) else { return }
         lastTransition = transition
         activityLine = "Hold elapsed — contraction committed. "
@@ -283,10 +288,10 @@ public final class CapacityPlannerViewModel {
 
     private func advanceClockToRealTime() {
         let now = DispatchTime.now().uptimeNanoseconds
-        // Subtraction guarded: `uptimeNanoseconds` is monotonic, but this class
-        // does not own that guarantee, and an unsigned underflow here would be
-        // a trap rather than a glitch.
-        let delta = now >= lastRealSample ? now - lastRealSample : 0
+        // `uptimeNanoseconds` is monotonic, but this class does not own that
+        // guarantee, and an unsigned underflow would be a trap rather than a
+        // glitch — so it goes through Saturating like everything else.
+        let delta = Saturating.subtracting(now, lastRealSample)
         lastRealSample = now
         clock = Saturating.adding(clock, delta)
     }

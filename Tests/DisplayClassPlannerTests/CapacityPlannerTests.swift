@@ -242,6 +242,65 @@ final class CapacityPlannerTests: XCTestCase {
         XCTAssertEqual(snapshot.inFlight.count, 1)
     }
 
+    // MARK: - Abandoning work that will never deliver
+
+    func testAbandonFreesTheSlotSoTheIdCanBeAdmittedAgain() async {
+        // Without `abandon`, a request that errors out sits in the in-flight
+        // table forever: every later reconcile finds it running and buckets it
+        // as `retained`, so it is never cancelled and never re-issued. This is
+        // the leak the package exists to prevent, reached via the happy path.
+        let planner = makePlanner(at: compact)
+        _ = await planner.apply(viewport: compact, desired: catalog, at: 0)
+        let dead = WorkID("asset-0")
+
+        let freed = await planner.abandon(dead)
+        XCTAssertTrue(freed)
+        var snapshot = await planner.snapshot()
+        XCTAssertFalse(snapshot.inFlight.keys.contains(dead))
+
+        // The next re-plan must offer it again rather than assume it running.
+        _ = await planner.apply(viewport: regular, desired: catalog, at: 1_000)
+        snapshot = await planner.snapshot()
+        XCTAssertTrue(
+            snapshot.inFlight.keys.contains(dead),
+            "an abandoned id must become eligible for admission again"
+        )
+    }
+
+    func testAbandoningSomethingNotInFlightReportsFalseAndChangesNothing() async {
+        let planner = makePlanner(at: compact)
+        _ = await planner.apply(viewport: compact, desired: catalog, at: 0)
+        let before = await planner.snapshot()
+        let freed = await planner.abandon(WorkID("never-started"))
+        XCTAssertFalse(freed)
+        let after = await planner.snapshot()
+        XCTAssertEqual(before.inFlight, after.inFlight)
+    }
+
+    // MARK: - The pending viewport is reachable during a hold
+
+    func testPendingViewportIsExposedWhileAContractionIsHeld() async {
+        // `tick(desired:)` asks the caller for the work it wants — and during a
+        // hold the right answer is "what the PENDING surface wants". A caller
+        // that cannot see the pending viewport plans the contraction against
+        // the pre-contraction one and gets the priorities wrong.
+        let planner = makePlanner(at: regular)
+        _ = await planner.apply(viewport: regular, desired: catalog, at: 0)
+        let seeded = await planner.snapshot()
+        XCTAssertNil(seeded.pendingViewport)
+
+        _ = await planner.apply(viewport: compact, desired: catalog, at: 1_000)
+        let held = await planner.snapshot()
+        XCTAssertEqual(held.pendingViewport, compact)
+        XCTAssertEqual(held.committed, regular, "committed must not move during a hold")
+        XCTAssertEqual(held.pendingDeadline, 1_000 + hold)
+
+        _ = await planner.tick(desired: catalog, at: 1_000 + hold)
+        let settled = await planner.snapshot()
+        XCTAssertNil(settled.pendingViewport)
+        XCTAssertEqual(settled.committed, compact)
+    }
+
     // MARK: - Bounds
 
     func testEventLogIsABoundedRing() async {

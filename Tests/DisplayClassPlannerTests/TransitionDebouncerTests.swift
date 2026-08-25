@@ -134,6 +134,24 @@ final class TransitionDebouncerTests: XCTestCase {
         XCTAssertEqual(debouncer.tick(at: 1_400_000_000), compact)
     }
 
+    func testExpansionHoldIsHonouredWhenTheCallerAsksForOne() {
+        // Every other test uses an expansion hold of 0, which means the knob
+        // could be deleted from `observe` entirely and the suite would not
+        // notice. This is the test that notices.
+        let eager = TransitionDebouncer.Policy(
+            expansionHoldNanos: 250_000_000, contractionHoldNanos: 400_000_000
+        )
+        var debouncer = TransitionDebouncer(committed: compact, policy: eager)
+        XCTAssertEqual(
+            debouncer.observe(regular, at: 1_000),
+            .hold(regular, until: 1_000 + 250_000_000),
+            "a non-zero expansion hold must delay the expansion, not apply it"
+        )
+        XCTAssertEqual(debouncer.committed, compact)
+        XCTAssertNil(debouncer.tick(at: 1_000 + 250_000_000 - 1))
+        XCTAssertEqual(debouncer.tick(at: 1_000 + 250_000_000), regular)
+    }
+
     func testImmediatePolicyDisablesHysteresisEntirely() {
         var debouncer = TransitionDebouncer(committed: regular, policy: .immediate)
         XCTAssertEqual(debouncer.observe(compact, at: 1_000), .applyNow(compact))

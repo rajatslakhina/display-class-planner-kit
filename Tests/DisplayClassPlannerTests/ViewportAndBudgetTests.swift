@@ -60,6 +60,46 @@ final class ViewportTests: XCTestCase {
         XCTAssertEqual(Viewport.classify(area: 1_000, columnCount: 3), .expansive)
     }
 
+    func testAnExplicitDisplayClassOverridesTheAreaThresholds() {
+        // The customisation seam. Without it the thresholds are a constant a
+        // caller can read but never change, and every downstream decision
+        // (hysteresis direction, budget tier) is stuck with them.
+        let tiny = Viewport(width: 100, height: 100, columnCount: 1, scale: 1)
+        XCTAssertEqual(tiny.displayClass, .compact)
+
+        let overridden = Viewport(
+            width: 100, height: 100, columnCount: 1, scale: 1, displayClass: .expansive
+        )
+        XCTAssertEqual(overridden.displayClass, .expansive)
+        // Only the classification is overridden; the measurements are not.
+        XCTAssertEqual(overridden.area, 10_000)
+
+        // And `nil` means "derive it as usual".
+        let derived = Viewport(
+            width: 100, height: 100, columnCount: 1, scale: 1, displayClass: nil
+        )
+        XCTAssertEqual(derived.displayClass, .compact)
+        XCTAssertEqual(derived, tiny)
+    }
+
+    func testDescriptionRendersWithoutTrappingOnHostileDimensions() {
+        // `description` formats the dimensions as Ints. `Int(Double)` traps on
+        // NaN and on out-of-range values, and this is the one place in the
+        // package where a debug string could take down the app that printed it.
+        XCTAssertFalse(Viewport(width: .nan, height: .nan, columnCount: 1).description.isEmpty)
+        let huge = Viewport(
+            width: .greatestFiniteMagnitude,
+            height: .greatestFiniteMagnitude,
+            columnCount: 9,
+            scale: 99
+        )
+        XCTAssertEqual(huge.description, "Viewport(100000x100000 cols:8 @4.0x -> .expansive)")
+        XCTAssertEqual(
+            Viewport(width: 420, height: 900, columnCount: 1, scale: 3).description,
+            "Viewport(420x900 cols:1 @3.0x -> .compact)"
+        )
+    }
+
     func testZeroViewportIsCompactAndHasNoArea() {
         XCTAssertEqual(Viewport.zero.area, 0)
         XCTAssertEqual(Viewport.zero.displayClass, .compact)

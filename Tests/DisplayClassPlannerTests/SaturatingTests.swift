@@ -68,6 +68,16 @@ final class SaturatingTests: XCTestCase {
         XCTAssertEqual(Saturating.adding(UInt64(10), 32), 42)
     }
 
+    func testUnsignedSubtractingClampsAtZeroInsteadOfTrapping() {
+        // `0 - 1` on UInt64 traps. This is `now - lastSample` when a clock
+        // reading comes back lower than the previous one.
+        XCTAssertEqual(Saturating.subtracting(UInt64(0), 1), 0)
+        XCTAssertEqual(Saturating.subtracting(UInt64(5), 9), 0)
+        XCTAssertEqual(Saturating.subtracting(UInt64(9), 5), 4)
+        XCTAssertEqual(Saturating.subtracting(UInt64.max, 0), UInt64.max)
+        XCTAssertEqual(Saturating.subtracting(UInt64(7), 7), 0)
+    }
+
     // MARK: - Division
 
     func testDividingByZeroReturnsFallbackInsteadOfTrapping() {
